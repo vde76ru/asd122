@@ -1,4 +1,7 @@
-/var/www/www-root/data/site/vdestor.ru/index_opensearch_v4.php
+� КРИТИЧЕСКАЯ ОШИБКА                                                                                                                                                                                                                                
+❌ ❌ Ошибка создания индекса: {"error":{"root_cause":[{"type":"runtime_exception","reason":"Line [34]: Invalid escaped char in [\\]"}],"type":"runtime_exception","reason":"Line [34]: Invalid escaped char in [\\]"},"status":500}                  
+� /var/www/www-root/data/site/vdestor.ru/index_opensearch_v4.php:174 
+
 <?php
 /**
  * 🚀 ИНДЕКСАТОР OPENSEARCH v5.0 - ТОЛЬКО СТАТИЧЕСКИЕ ДАННЫЕ
@@ -14,7 +17,7 @@
  * - Остатки (загружаются динамически по городам/складам)
  */
 
-require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/vendor/autoload.php';
 
 use OpenSearch\ClientBuilder;
 use App\Core\Database;
@@ -282,6 +285,20 @@ class StaticProductIndexer {
      * 🔨 Подготовка документа для индексации
      */
     private function prepareDocument(array $product): array {
+        // 🔧 Обрабатываем числовые свойства ДО создания документа
+        $numericProps = [];
+        if (!empty($product['attributes'])) {
+            foreach ($product['attributes'] as $attr) {
+                if (preg_match('/^([\d\.,]+)\s*([а-яА-ЯA-Za-z]*)/', $attr['value'], $matches)) {
+                    $numericProps[] = [
+                        'name' => $attr['name'],
+                        'value' => (float) str_replace(',', '.', $matches[1]),
+                        'unit' => $matches[2] ?: $attr['unit']
+                    ];
+                }
+            }
+        }
+        
         // Базовые поля
         $doc = [
             'product_id' => (int)$product['product_id'],
@@ -289,59 +306,41 @@ class StaticProductIndexer {
             'sku' => $this->normalizeText($product['sku']),
             'name' => $this->normalizeText($product['name']),
             'description' => $this->normalizeText($product['description']),
-            'unit' => $product['unit'] ?: 'шт',
-            'min_sale' => (int)($product['min_sale'] ?: 1),
-            'weight' => (float)($product['weight'] ?: 0),
-            'dimensions' => $product['dimensions'],
-            'created_at' => $this->formatDate($product['created_at']),
-            'updated_at' => $this->formatDate($product['updated_at']),
             
-            // Бренд и серия
-            'brand_id' => (int)($product['brand_id'] ?: 0),
+            // 🎯 Поля для приоритетного поиска
+            'search_name_exact' => $product['name'], // Для точного поиска
+            'search_code_exact' => $product['external_id'], // Для точного поиска артикула
+            
+            // Добавляем числовые свойства
+            'numeric_props' => $numericProps,
+            
+            // Остальные поля...
             'brand_name' => $this->normalizeText($product['brand_name']),
-            'series_id' => (int)($product['series_id'] ?: 0),
-            'series_name' => $this->normalizeText($product['series_name']),
-            
-            // Дополнительные данные
             'categories' => $product['categories']['names'] ?? [],
             'category_ids' => $product['categories']['ids'] ?? [],
             'images' => $product['images'],
             'attributes' => $product['attributes'],
             'documents' => $product['documents'],
             
-            // Поля для поиска
-            'search_text' => $this->buildSearchText($product),
-            
-            // Данные для автодополнения
-            'suggest' => $this->buildSuggestData($product),
-            
-            // Метрики (если есть)
+            // Метрики
             'popularity_score' => $this->getPopularityScore($product['product_id']),
             'total_stock' => $this->getTotalStock($product['product_id']),
             'cities_available' => $this->getCitiesWithStock($product['product_id']),
             'has_stock' => $this->hasAnyStock($product['product_id']),
             
-            // Флаги для фильтрации
+            // Флаги
             'has_images' => !empty($product['images']),
-            'has_description' => !empty($product['description'])
+            'has_description' => !empty($product['description']),
+            
+            // Поисковый текст
+            'search_text' => $this->buildSearchText($product),
+            'suggest' => $this->buildSuggestData($product),
+            
+            // Временные метки
+            'created_at' => $this->formatDate($product['created_at']),
+            'updated_at' => $this->formatDate($product['updated_at'])
         ];
-    
-        // Обработка числовых свойств
-        $product['numeric_props'] = [];
-        foreach ($product['attributes'] as $attr) {
-            if (preg_match('/^[\d\.,]+/', $attr['value'])) {
-                $product['numeric_props'][] = [
-                    'name' => $attr['name'],
-                    'value' => (float) str_replace(',', '.', $attr['value'])
-                ];
-            }
-        }
-    
-        // Добавляем числовые свойства в документ
-        if (!empty($product['numeric_props'])) {
-            $doc['numeric_props'] = $product['numeric_props'];
-        }
-    
+        
         // Удаляем пустые значения
         return array_filter($doc, function($value) {
             return $value !== null && $value !== '' && $value !== [];
@@ -663,6 +662,71 @@ class StaticProductIndexer {
         $timestamp = strtotime($date);
         return $timestamp ? date('c', $timestamp) : date('c');
     }
+    
+    /**
+     * 🧠 Расчет умных факторов для поиска
+     * 
+     * Этот метод анализирует товар и создает коэффициенты, которые помогут
+     * OpenSearch лучше ранжировать результаты поиска
+     * 
+     * @param array $product Данные товара
+     * @return array Массив коэффициентов для различных типов поиска
+     */
+    private function calculateSearchBoostFactors(array $product): array {
+        // Базовые коэффициенты (стандартные для всех товаров)
+        $factors = [
+            'name_match' => 1.0,      // Для поиска по названию
+            'brand_match' => 1.0,     // Для поиска по бренду
+            'code_match' => 1.0,      // Для поиска по артикулу
+            'category_match' => 1.0   // Для поиска по категории
+        ];
+        
+        // 📈 Бонус за популярность товара
+        $popularity = $this->getPopularityScore($product['product_id']);
+        if ($popularity > 50) {
+            $factors['name_match'] *= 1.2;  // Популярные товары показываем выше
+            echo "   📈 Популярный товар (score: $popularity), добавляем бонус к названию\n";
+        }
+        
+        // 🖼️ Бонус за наличие изображений (товары с фото выглядят лучше)
+        if (!empty($product['images'])) {
+            $factors['name_match'] *= 1.1;
+            $factors['brand_match'] *= 1.05;
+        }
+        
+        // 📦 Бонус за наличие остатков (товары в наличии важнее)
+        if ($this->hasAnyStock($product['product_id'])) {
+            $factors['name_match'] *= 1.15;
+            $factors['code_match'] *= 1.15;
+            $factors['brand_match'] *= 1.1;
+        }
+        
+        // 🏆 Бонус за известные бренды (им доверяют больше)
+        $topBrands = [
+            'schneider', 'legrand', 'abb', 'siemens', 'iek', 'tdm', 
+            'eaton', 'hager', 'keaz', 'era'
+        ];
+        
+        $brandLower = strtolower(trim($product['brand_name'] ?? ''));
+        if (in_array($brandLower, $topBrands)) {
+            $factors['brand_match'] *= 1.3;
+            $factors['name_match'] *= 1.1;
+        }
+        
+        // 📊 Бонус за полноту описания
+        $descriptionLength = strlen($product['description'] ?? '');
+        if ($descriptionLength > 100) {
+            $factors['name_match'] *= 1.05; // Небольшой бонус за подробное описание
+        }
+        
+        // 🔧 Бонус за количество атрибутов (больше характеристик = лучше товар)
+        $attributeCount = count($product['attributes'] ?? []);
+        if ($attributeCount > 5) {
+            $factors['name_match'] *= 1.08;
+        }
+        
+        return $factors;
+    }
 
     private function formatTime(float $seconds): string {
         if ($seconds < 60) {
@@ -979,404 +1043,368 @@ try {
 /var/www/www-root/data/site/vdestor.ru/opensearch_mappings/products_v5.json
 {
   "settings": {
-    "number_of_shards": 1,
+    "number_of_shards": 3,
     "number_of_replicas": 1,
-    "index.max_ngram_diff": 20,
-    "index.max_result_window": 50000,
+    "index.max_ngram_diff": 25,
+    "index.max_result_window": 100000,
     "index.refresh_interval": "30s",
-    "index.number_of_routing_shards": 1,
+    "index.number_of_routing_shards": 3,
+    
+    "index.mapping.total_fields.limit": 3000,
+    "index.mapping.depth.limit": 25,
+    "index.mapping.nested_fields.limit": 150,
+    
     "analysis": {
       "normalizer": {
-        "lowercase": {
+        "lowercase_normalizer": {
           "type": "custom",
           "char_filter": [],
+          "filter": ["lowercase", "asciifolding"]
+        },
+        
+        "code_normalizer": {
+          "type": "custom", 
+          "char_filter": ["spaces_and_symbols"],
           "filter": ["lowercase"]
         }
       },
+      
       "char_filter": {
-        "ru_en_keyboard_mapping": {
+        "keyboard_layout_mapper": {
           "type": "mapping",
           "mappings": [
-            "q=>й","w=>ц","e=>у","r=>к","t=>е","y=>н","u=>г","i=>ш","o=>щ","z=>з","p=>п",
-            "a=>ф","s=>ы","d=>в","f=>а","g=>п","h=>р","j=>о","k=>л","l=>д",
-            "x=>ч","c=>с","v=>м","b=>и","n=>т","m=>ь",
-            "ё=>е","й=>и",
-            "A=>А","B=>В","E=>Е","K=>К","M=>М","H=>Н","O=>О","P=>Р","C=>С","T=>Т","Y=>У","X=>Х",
-            "/=> ","\\\\=> ","-=> ","_=> ",".=> ",",=> "
+            "q=>й", "w=>ц", "e=>у", "r=>к", "t=>е", "y=>н", "u=>г", "i=>ш", "o=>щ", "p=>з",
+            "[=>х", "]=>ъ", "a=>ф", "s=>ы", "d=>в", "f=>а", "g=>п", "h=>р", "j=>о", "k=>л", 
+            "l=>д", ";=>ж", "'=>э", "z=>я", "x=>ч", "c=>с", "v=>м", "b=>и", "n=>т", "m=>ь",
+            ",=>б", ".=>ю", "/=>.", "\\=>\\",
+            
+            "й=>q", "ц=>w", "у=>e", "к=>r", "е=>t", "н=>y", "г=>u", "ш=>i", "щ=>o", "з=>p",
+            "х=>[", "ъ=>]", "ф=>a", "ы=>s", "в=>d", "а=>f", "п=>g", "р=>h", "о=>j", "л=>k",
+            "д=>l", "ж=>;", "э=>'", "я=>z", "ч=>x", "с=>c", "м=>v", "и=>b", "т=>n", "ь=>m",
+            "б=>,", "ю=>.", ".=>/"
           ]
         },
-        "code_normalizer": {
+        
+        "unit_combiner": {
           "type": "pattern_replace",
-          "pattern": "[\\s\\-\\._/,]+",
+          "pattern": "(\\d+)\\s*(а|ампер|amp|a|в|вольт|volt|v|вт|ватт|watt|w|мм|mm|см|cm|м|m)\\b",
+          "replacement": "$1$2",
+          "flags": "CASE_INSENSITIVE"
+        },
+        
+        "spaces_and_symbols": {
+          "type": "pattern_replace",
+          "pattern": "[\\s\\-\\._/\\\\,()\\[\\]]+",
           "replacement": ""
         },
+        
         "space_normalizer": {
           "type": "pattern_replace",
           "pattern": "\\s+",
           "replacement": " "
         },
-        "remove_special": {
-          "type": "pattern_replace",
-          "pattern": "[^\\p{L}\\p{N}\\s]",
-          "replacement": " "
+        
+        "brand_normalizer": {
+          "type": "mapping",
+          "mappings": [
+            "шнайдер=>schneider", "шнейдер=>schneider", "schneid=>schneider",
+            "легранд=>legrand", "легран=>legrand", "лигранд=>legrand",
+            "иэк=>iek", "иек=>iek", "aiek=>iek",
+            "тдм=>tdm", "тдмэлектрик=>tdm",
+            "эра=>era", "ера=>era",
+            "кэаз=>keaz", "кеаз=>keaz"
+          ]
         }
       },
+      
       "tokenizer": {
-        "edge_ngram_tokenizer": {
+        "smart_edge_ngram": {
           "type": "edge_ngram",
-          "min_gram": 1,
+          "min_gram": 2,
           "max_gram": 20,
           "token_chars": ["letter", "digit"]
         },
-        "ngram_tokenizer": {
-          "type": "ngram",
-          "min_gram": 3,
-          "max_gram": 5,
-          "token_chars": ["letter", "digit"]
-        },
-        "autocomplete_tokenizer": {
-          "type": "edge_ngram",
-          "min_gram": 2,
-          "max_gram": 15,
-          "token_chars": ["letter", "digit"]
+        
+        "flexible_keyword": {
+          "type": "pattern",
+          "pattern": "[\\s\\-\\._/\\\\,()\\[\\]]+",
+          "flags": "CASE_INSENSITIVE"
         }
       },
+      
       "filter": {
-        "synonym_filter": {
+        "electrical_synonyms": {
           "type": "synonym",
           "synonyms": [
-            "выключатель,переключатель,switch,свитч,выкл,выключ",
-            "розетка,разъем,socket,гнездо,разьем,розет",
-            "кабель,провод,шнур,cable,wire,кабел,кабл",
-            "автомат,автоматический выключатель,авт выкл,mcb,автомат выключатель,автоматич",
-            "щит,щиток,шкаф,бокс,panel,щитовое,щитов",
-            "лампа,лампочка,светильник,lamp,light,освещение,ламп",
-            "вт,ватт,w,watt=>ватт",
-            "квт,киловатт,kw,kilowatt=>киловатт",
-            "а,ампер,a,amp,ampere=>ампер",
-            "в,вольт,v,volt=>вольт",
-            "мм,миллиметр,mm=>миллиметр",
-            "м,метр,m,meter=>метр",
-            "шнайдер,schneider,шнейдер,schneid=>schneider",
-            "легранд,legrand,легран=>legrand",
-            "абб,abb=>abb",
-            "иэк,iek,иек=>iek",
-            "дкс,dks,дкц=>dks"
+            "выключатель,переключатель,switch,свитч,выкл,выключ,кнопка=>выключатель",
+            "автомат,автоматический выключатель,авт выкл,mcb,автомат выключатель,автоматический=>автомат",
+            "узо,устройство защитного отключения,rcd,дифавтомат=>узо",
+            "розетка,разъем,socket,гнездо,разьем,розет,штепсель=>розетка",
+            "кабель,провод,шнур,cable,wire,кабел,кабл,провода=>кабель",
+            "щит,щиток,шкаф,бокс,panel,щитовое,электрощит,распредщит=>щит",
+            "лампа,лампочка,светильник,lamp,light,освещение,лед,led=>лампа",
+            "контактор,пускатель,реле,relay,контактр=>контактор",
+            "счетчик,электросчетчик,meter,счётчик=>счетчик",
+            "трансформатор,тр,transformer,транс=>трансформатор",
+            "клеммник,клемма,terminal,зажим=>клеммник",
+            "din,дин,дин рейка,din rail=>динрейка",
+            
+            "а,ампер,amp,ampere=>а",
+            "в,вольт,volt,v=>в", 
+            "вт,ватт,watt,w=>вт",
+            "мм,миллиметр,mm=>мм",
+            "см,сантиметр,cm=>см",
+            "м,метр,meter=>м",
+            "квт,киловатт,kw,квватт=>квт",
+            "кв,киловольт,kv=>кв",
+            
+            "однополюсный,1п,1p,1-полюсный=>1п",
+            "двухполюсный,2п,2p,2-полюсный=>2п", 
+            "трехполюсный,3п,3p,3-полюсный=>3п",
+            "четырехполюсный,4п,4p,4-полюсный=>4п",
+            
+            "белый,белая,белое=>белый",
+            "черный,черная,черное=>черный",
+            "серый,серая,серое=>серый"
           ]
         },
+        
+        "brand_synonyms": {
+          "type": "synonym", 
+          "synonyms": [
+            "schneider,шнайдер,шнейдер,schneid=>schneider",
+            "legrand,легранд,легран,лигранд=>legrand",
+            "iek,иэк,иек,aiek=>iek",
+            "abb,абб,эбб=>abb",
+            "tdm,тдм,тдмэлектрик=>tdm",
+            "era,эра,ера=>era",
+            "keaz,кэаз,кеаз=>keaz",
+            "eaton,итон,еатон=>eaton",
+            "siemens,сименс,зименс=>siemens",
+            "hager,хагер,хейгер=>hager"
+          ]
+        },
+        
         "russian_stemmer": {
           "type": "stemmer",
           "language": "russian"
         },
-        "english_stemmer": {
-          "type": "stemmer",
-          "language": "english"
-        },
-        "shingle_filter": {
-          "type": "shingle",
-          "min_shingle_size": 2,
-          "max_shingle_size": 3,
-          "output_unigrams": true
-        },
+        
         "edge_ngram_filter": {
           "type": "edge_ngram",
           "min_gram": 2,
           "max_gram": 15
         },
-        "phonetic_filter": {
-          "type": "phonetic",
-          "encoder": "double_metaphone",
-          "replace": false
+        
+        "shingle_filter": {
+          "type": "shingle",
+          "min_shingle_size": 2,
+          "max_shingle_size": 3,
+          "output_unigrams": true
         }
       },
+      
       "analyzer": {
-        "text_analyzer": {
+        "smart_search_analyzer": {
           "tokenizer": "standard",
-          "char_filter": ["ru_en_keyboard_mapping", "space_normalizer"],
-          "filter": ["lowercase", "synonym_filter", "russian_stemmer", "english_stemmer"]
+          "char_filter": [
+            "keyboard_layout_mapper",
+            "brand_normalizer", 
+            "unit_combiner",
+            "space_normalizer"
+          ],
+          "filter": [
+            "lowercase",
+            "brand_synonyms",
+            "electrical_synonyms",
+            "russian_stemmer",
+            "shingle_filter"
+          ]
         },
-        "text_analyzer_no_stemming": {
+        
+        "smart_query_analyzer": {
           "tokenizer": "standard",
-          "char_filter": ["ru_en_keyboard_mapping", "space_normalizer"],
-          "filter": ["lowercase", "synonym_filter"]
+          "char_filter": [
+            "keyboard_layout_mapper",
+            "brand_normalizer",
+            "unit_combiner"
+          ],
+          "filter": [
+            "lowercase", 
+            "brand_synonyms",
+            "electrical_synonyms"
+          ]
         },
+        
         "code_analyzer": {
-          "tokenizer": "keyword",
-          "char_filter": ["code_normalizer"],
+          "tokenizer": "flexible_keyword",
+          "char_filter": ["spaces_and_symbols"],
           "filter": ["lowercase"]
         },
+        
         "code_prefix_analyzer": {
-          "tokenizer": "keyword",
-          "char_filter": ["code_normalizer"],
-          "filter": ["lowercase", "edge_ngram_filter"]
+          "tokenizer": "smart_edge_ngram",
+          "char_filter": ["spaces_and_symbols"],
+          "filter": ["lowercase"]
         },
+        
         "autocomplete_analyzer": {
-          "tokenizer": "autocomplete_tokenizer",
-          "char_filter": ["ru_en_keyboard_mapping", "space_normalizer"],
-          "filter": ["lowercase"]
+          "tokenizer": "smart_edge_ngram",
+          "char_filter": [
+            "keyboard_layout_mapper",
+            "brand_normalizer",
+            "space_normalizer"
+          ],
+          "filter": ["lowercase", "brand_synonyms"]
         },
-        "ngram_analyzer": {
-          "tokenizer": "ngram_tokenizer",
-          "char_filter": ["ru_en_keyboard_mapping", "remove_special"],
-          "filter": ["lowercase"]
+        
+        "exact_match_analyzer": {
+          "tokenizer": "keyword",
+          "char_filter": ["space_normalizer"],
+          "filter": ["lowercase", "asciifolding"]
         },
+        
         "phonetic_analyzer": {
           "tokenizer": "standard",
-          "char_filter": ["space_normalizer"],
-          "filter": ["lowercase", "phonetic_filter"]
-        },
-        "search_analyzer": {
-          "tokenizer": "standard",
-          "char_filter": ["ru_en_keyboard_mapping", "space_normalizer"],
-          "filter": ["lowercase", "synonym_filter"]
+          "char_filter": ["keyboard_layout_mapper"],
+          "filter": [
+            "lowercase",
+            "brand_synonyms", 
+            "electrical_synonyms",
+            "russian_stemmer"
+          ]
         }
       }
     }
   },
+  
   "mappings": {
     "properties": {
       "product_id": {
-        "type": "long",
-        "index": true
+        "type": "long"
       },
+      
+      "name": {
+        "type": "text",
+        "analyzer": "smart_search_analyzer",
+        "search_analyzer": "smart_query_analyzer",
+        "boost": 10,
+        "fields": {
+          "exact": {
+            "type": "text",
+            "analyzer": "exact_match_analyzer",
+            "boost": 25
+          },
+          "autocomplete": {
+            "type": "text", 
+            "analyzer": "autocomplete_analyzer",
+            "search_analyzer": "smart_query_analyzer"
+          },
+          "phonetic": {
+            "type": "text",
+            "analyzer": "phonetic_analyzer",
+            "boost": 3
+          },
+          "keyword": {
+            "type": "keyword",
+            "normalizer": "lowercase_normalizer"
+          }
+        }
+      },
+      
       "external_id": {
         "type": "text",
         "analyzer": "code_analyzer",
-        "search_analyzer": "code_analyzer",
+        "boost": 20,
         "fields": {
-          "keyword": {
-            "type": "keyword",
-            "normalizer": "lowercase"
-          },
           "prefix": {
             "type": "text",
             "analyzer": "code_prefix_analyzer",
-            "search_analyzer": "code_analyzer"
+            "boost": 15
           },
-          "ngram": {
-            "type": "text",
-            "analyzer": "ngram_analyzer"
+          "keyword": {
+            "type": "keyword",
+            "normalizer": "code_normalizer"
           }
         }
       },
+      
       "sku": {
         "type": "text",
-        "analyzer": "code_analyzer",
-        "search_analyzer": "code_analyzer",
+        "analyzer": "code_analyzer", 
+        "boost": 18,
         "fields": {
-          "keyword": {
-            "type": "keyword",
-            "normalizer": "lowercase"
-          },
           "prefix": {
             "type": "text",
             "analyzer": "code_prefix_analyzer",
-            "search_analyzer": "code_analyzer"
-          }
-        }
-      },
-      "name": {
-        "type": "text",
-        "analyzer": "text_analyzer",
-        "search_analyzer": "search_analyzer",
-        "fields": {
+            "boost": 12
+          },
           "keyword": {
-            "type": "keyword"
-          },
-          "raw": {
             "type": "keyword",
-            "normalizer": "lowercase"
-          },
-          "no_stemming": {
-            "type": "text",
-            "analyzer": "text_analyzer_no_stemming",
-            "search_analyzer": "search_analyzer"
-          },
-          "autocomplete": {
-            "type": "text",
-            "analyzer": "autocomplete_analyzer",
-            "search_analyzer": "search_analyzer"
-          },
-          "ngram": {
-            "type": "text",
-            "analyzer": "ngram_analyzer"
-          },
-          "phonetic": {
-            "type": "text",
-            "analyzer": "phonetic_analyzer"
+            "normalizer": "code_normalizer"
           }
         }
       },
+      
       "description": {
         "type": "text",
-        "analyzer": "text_analyzer",
-        "search_analyzer": "search_analyzer",
-        "fields": {
-          "ngram": {
-            "type": "text",
-            "analyzer": "ngram_analyzer"
-          }
-        }
+        "analyzer": "smart_search_analyzer",
+        "search_analyzer": "smart_query_analyzer",
+        "boost": 2
       },
-      "unit": {
-        "type": "keyword"
-      },
-      "min_sale": {
-        "type": "integer"
-      },
-      "weight": {
-        "type": "float"
-      },
-      "dimensions": {
-        "type": "keyword"
-      },
-      "created_at": {
-        "type": "date"
-      },
-      "updated_at": {
-        "type": "date"
-      },
-      "brand_id": {
-        "type": "integer"
-      },
+      
       "brand_name": {
         "type": "text",
-        "analyzer": "text_analyzer",
-        "search_analyzer": "search_analyzer",
+        "analyzer": "smart_search_analyzer", 
+        "search_analyzer": "smart_query_analyzer",
+        "boost": 12,
         "fields": {
+          "exact": {
+            "type": "text",
+            "analyzer": "exact_match_analyzer",
+            "boost": 20
+          },
           "keyword": {
-            "type": "keyword"
-          },
-          "raw": {
             "type": "keyword",
-            "normalizer": "lowercase"
-          },
-          "autocomplete": {
-            "type": "text",
-            "analyzer": "autocomplete_analyzer",
-            "search_analyzer": "search_analyzer"
-          },
-          "phonetic": {
-            "type": "text",
-            "analyzer": "phonetic_analyzer"
+            "normalizer": "lowercase_normalizer"
           }
         }
       },
-      "series_id": {
-        "type": "integer"
-      },
+      
       "series_name": {
         "type": "text",
-        "analyzer": "text_analyzer",
-        "search_analyzer": "search_analyzer",
+        "analyzer": "smart_search_analyzer",
+        "search_analyzer": "smart_query_analyzer", 
+        "boost": 8,
         "fields": {
-          "keyword": {
-            "type": "keyword"
-          },
-          "raw": {
-            "type": "keyword",
-            "normalizer": "lowercase"
-          },
-          "autocomplete": {
+          "exact": {
             "type": "text",
-            "analyzer": "autocomplete_analyzer"
+            "analyzer": "exact_match_analyzer",
+            "boost": 15
           }
         }
       },
-      "price": {
-        "type": "object",
-        "properties": {
-          "final": {
-            "type": "float"
-          },
-          "base": {
-            "type": "float"
-          },
-          "has_special": {
-            "type": "boolean"
-          }
-        }
-      },
-      "stock": {
-        "type": "object",
-        "properties": {
-          "quantity": {
-            "type": "integer"
-          },
-          "available": {
-            "type": "boolean"
-          }
-        }
-      },
-      "availability": {
-        "type": "object",
-        "properties": {
-          "text": {
-            "type": "text"
-          }
-        }
-      },
-      "images": {
-        "type": "keyword"
-      },
-      "image_url": {
-        "type": "keyword"
-      },
-      "image_urls": {
-        "type": "keyword"
-      },
-      "_exact_match": {
-        "type": "boolean"
-      },
-      "_formatted_name": {
-        "type": "text"
-      },
-      "_highlight": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "text"
-          }
-        }
-      },
-      "suggest": {
-        "type": "completion",
-        "analyzer": "text_analyzer_no_stemming",
-        "search_analyzer": "text_analyzer_no_stemming",
-        "preserve_separators": false,
-        "preserve_position_increments": false,
-        "max_input_length": 100
-      },
-      "popularity_score": {
-        "type": "float",
-        "null_value": 0.0
-      },
-      "in_stock": {
-        "type": "boolean",
-        "null_value": false
-      },
+      
       "categories": {
         "type": "text",
-        "analyzer": "text_analyzer",
-        "fields": {
-          "keyword": {
-            "type": "keyword"
-          },
-          "raw": {
-            "type": "keyword",
-            "normalizer": "lowercase"
-          }
-        }
+        "analyzer": "smart_search_analyzer",
+        "search_analyzer": "smart_query_analyzer",
+        "boost": 6
       },
-      "category_ids": {
-        "type": "integer"
+      
+      "search_text": {
+        "type": "text",
+        "analyzer": "smart_search_analyzer",
+        "search_analyzer": "smart_query_analyzer",
+        "boost": 5
       },
+      
       "attributes": {
         "type": "nested",
         "properties": {
           "name": {
             "type": "text",
-            "analyzer": "text_analyzer",
+            "analyzer": "smart_search_analyzer",
             "fields": {
               "keyword": {
                 "type": "keyword"
@@ -1384,11 +1412,16 @@ try {
             }
           },
           "value": {
-            "type": "text",
-            "analyzer": "text_analyzer",
+            "type": "text", 
+            "analyzer": "smart_search_analyzer",
+            "search_analyzer": "smart_query_analyzer",
             "fields": {
               "keyword": {
                 "type": "keyword"
+              },
+              "numeric": {
+                "type": "float",
+                "ignore_malformed": true
               }
             }
           },
@@ -1397,6 +1430,56 @@ try {
           }
         }
       },
+      
+      "numeric_props": {
+        "type": "nested",
+        "properties": {
+          "name": {
+            "type": "keyword"
+          },
+          "value": {
+            "type": "float"
+          },
+          "unit": {
+            "type": "keyword"
+          }
+        }
+      },
+      
+      "unit": {
+        "type": "keyword"
+      },
+      
+      "brand_id": {
+        "type": "integer"
+      },
+      
+      "series_id": {
+        "type": "integer"
+      },
+      
+      "category_ids": {
+        "type": "integer"
+      },
+      
+      "min_sale": {
+        "type": "integer"
+      },
+      
+      "weight": {
+        "type": "float"
+      },
+      
+      "dimensions": {
+        "type": "text",
+        "analyzer": "smart_search_analyzer"
+      },
+      
+      "images": {
+        "type": "keyword",
+        "index": false
+      },
+      
       "documents": {
         "type": "object",
         "properties": {
@@ -1411,831 +1494,75 @@ try {
           }
         }
       },
+      
+      "popularity_score": {
+        "type": "float"
+      },
+      
       "total_stock": {
         "type": "integer"
       },
+      
       "cities_available": {
         "type": "integer"
       },
+      
       "has_stock": {
         "type": "boolean"
+      },
+      
+      "has_images": {
+        "type": "boolean"
+      },
+      
+      "has_description": {
+        "type": "boolean"
+      },
+      
+      "created_at": {
+        "type": "date"
+      },
+      
+      "updated_at": {
+        "type": "date"
+      },
+      
+      "suggest": {
+        "type": "completion",
+        "analyzer": "autocomplete_analyzer",
+        "search_analyzer": "smart_query_analyzer",
+        "max_input_length": 100,
+        "contexts": [
+          {
+            "name": "category_context",
+            "type": "category"
+          },
+          {
+            "name": "brand_context", 
+            "type": "category"
+          }
+        ]
+      },
+      
+      "search_boost_factors": {
+        "type": "object",
+        "properties": {
+          "name_match": {
+            "type": "float"
+          },
+          "brand_match": {
+            "type": "float"
+          },
+          "code_match": {
+            "type": "float"
+          },
+          "category_match": {
+            "type": "float"
+          }
+        }
       }
     }
   }
 }
 
-/var/www/www-root/data/site/vdestor.ru/src/Services/SearchService.php
-<?php
-namespace App\Services;
 
-use App\Core\Database;
-use App\Core\Logger;
-use App\Core\Cache;
-use OpenSearch\ClientBuilder;
-
-class SearchService
-{
-    private static ?\OpenSearch\Client $client = null;
-
-    public static function search(array $params): array
-    {
-        $requestId = uniqid('search_', true);
-        $startTime = microtime(true);
-
-        // ДОБАВЛЯЕМ ДИАГНОСТИКУ
-        $diagnostics = [
-            'request_id' => $requestId,
-            'start_time' => date('Y-m-d H:i:s'),
-            'params' => $params
-        ];
-
-        Logger::info("🔍 [$requestId] Search started", ['params' => $params]);
-
-        try {
-            $params = self::validateParams($params);
-            $diagnostics['validated_params'] = $params;
-
-            // Если нет поискового запроса, используем MySQL для листинга
-            if (empty($params['q']) || strlen(trim($params['q'])) === 0) {
-                Logger::info("📋 [$requestId] Empty query, using MySQL for listing");
-                $diagnostics['search_method'] = 'mysql_listing';
-
-                $result = self::searchViaMySQL($params);
-                $result['diagnostics'] = $diagnostics;
-
-                return [
-                    'success' => true,
-                    'data' => $result
-                ];
-            }
-
-            // Парсим поисковый запрос
-            $parsedQuery = self::parseSearchQuery($params['q']);
-            $diagnostics['parsed_query'] = $parsedQuery;
-
-            // Проверяем доступность OpenSearch
-            $opensearchAvailable = self::isOpenSearchAvailable();
-            $diagnostics['opensearch_available'] = $opensearchAvailable;
-
-            if ($opensearchAvailable) {
-                Logger::debug("✅ [$requestId] Using OpenSearch");
-                $diagnostics['search_method'] = 'opensearch';
-
-                try {
-                    $result = self::performOpenSearchWithTimeout($params, $requestId, $parsedQuery);
-                    $diagnostics['opensearch_success'] = true;
-                    $result['diagnostics'] = $diagnostics;
-
-                    $duration = round((microtime(true) - $startTime) * 1000, 2);
-                    Logger::info("✅ [$requestId] OpenSearch completed in {$duration}ms");
-
-                    return [
-                        'success' => true,
-                        'data' => $result
-                    ];
-                } catch (\Exception $e) {
-                    Logger::warning("⚠️ [$requestId] OpenSearch failed, falling back to MySQL", [
-                        'error' => $e->getMessage()
-                    ]);
-                    $diagnostics['opensearch_error'] = $e->getMessage();
-                    $diagnostics['search_method'] = 'mysql_fallback';
-                }
-            } else {
-                Logger::warning("⚠️ [$requestId] OpenSearch unavailable, using MySQL");
-                $diagnostics['search_method'] = 'mysql_primary';
-            }
-
-            // MySQL поиск (основной или fallback)
-            $result = self::searchViaMySQL($params);
-            $result['diagnostics'] = $diagnostics;
-
-            return [
-                'success' => true,
-                'data' => $result
-            ];
-
-        } catch (\Exception $e) {
-            $duration = round((microtime(true) - $startTime) * 1000, 2);
-            Logger::error("❌ [$requestId] Failed after {$duration}ms", [
-                'error' => $e->getMessage()
-            ]);
-
-            $diagnostics['final_error'] = $e->getMessage();
-            $diagnostics['search_method'] = 'error_fallback';
-
-            // Всегда пробуем MySQL fallback при ошибке
-            try {
-                Logger::info("🔄 [$requestId] Trying MySQL fallback");
-                $result = self::searchViaMySQL($params);
-                $result['diagnostics'] = $diagnostics;
-
-                return [
-                    'success' => true,
-                    'data' => $result,
-                    'used_fallback' => true
-                ];
-            } catch (\Exception $fallbackError) {
-                Logger::error("❌ [$requestId] MySQL fallback also failed", [
-                    'error' => $fallbackError->getMessage()
-                ]);
-
-                $diagnostics['fallback_error'] = $fallbackError->getMessage();
-
-                return [
-                    'success' => false,
-                    'error' => 'Search service temporarily unavailable',
-                    'error_code' => 'SERVICE_UNAVAILABLE',
-                    'data' => [
-                        'products' => [],
-                        'total' => 0,
-                        'page' => $params['page'] ?? 1,
-                        'limit' => $params['limit'] ?? 20,
-                        'diagnostics' => $diagnostics
-                    ]
-                ];
-            }
-        }
-    }
-
-    /**
-     * Улучшенный MySQL поиск с поддержкой транслитерации и исправления раскладки
-     */
-    private static function searchViaMySQL(array $params): array
-    {
-        $query = $params['q'] ?? '';
-        $page = $params['page'];
-        $limit = $params['limit'];
-        $offset = ($page - 1) * $limit;
-    
-        try {
-            $pdo = Database::getConnection();
-    
-            // Если нет поискового запроса - просто получаем список товаров
-            if (empty($query)) {
-                $sql = "SELECT SQL_CALC_FOUND_ROWS 
-                        p.product_id, p.external_id, p.sku, p.name, p.description,
-                        p.brand_id, p.series_id, p.unit, p.min_sale, p.weight, p.dimensions,
-                        b.name as brand_name, s.name as series_name,
-                        1 as relevance_score
-                        FROM products p
-                        LEFT JOIN brands b ON p.brand_id = b.brand_id
-                        LEFT JOIN series s ON p.series_id = s.series_id
-                        WHERE 1=1";
-    
-                $bindParams = [];
-            } else {
-                // Генерируем варианты запроса
-                $searchVariants = self::generateSearchVariants($query);
-    
-                // Строим SQL с учетом всех вариантов
-                $whereClauses = [];
-                $bindParams = [];
-                
-                foreach ($searchVariants as $index => $variant) {
-                    // Уникальные ключи для каждого варианта
-                    $exactKey = "exact_v{$index}";
-                    $prefixKey = "prefix_v{$index}";
-                    $searchKey = "search_v{$index}";
-    
-                    $whereClauses[] = "(
-                        p.external_id = :{$exactKey} OR
-                        p.sku = :{$exactKey} OR
-                        p.external_id LIKE :{$prefixKey} OR
-                        p.sku LIKE :{$prefixKey} OR
-                        p.name LIKE :{$searchKey} OR
-                        p.description LIKE :{$searchKey} OR
-                        b.name LIKE :{$searchKey}
-                    )";
-    
-                    $bindParams[$exactKey] = $variant;
-                    $bindParams[$prefixKey] = $variant . '%';
-                    $bindParams[$searchKey] = '%' . $variant . '%';
-                }
-    
-                // Базовый запрос с оригинальными параметрами для скоринга
-                $sql = "SELECT SQL_CALC_FOUND_ROWS 
-                        p.product_id, p.external_id, p.sku, p.name, p.description,
-                        p.brand_id, p.series_id, p.unit, p.min_sale, p.weight, p.dimensions,
-                        b.name as brand_name, s.name as series_name,
-                        CASE 
-                            WHEN p.external_id = :score_exact THEN 1000
-                            WHEN p.sku = :score_exact THEN 900
-                            WHEN p.external_id LIKE :score_prefix THEN 100
-                            WHEN p.sku LIKE :score_prefix THEN 90
-                            WHEN p.name = :score_exact THEN 80
-                            WHEN p.name LIKE :score_prefix THEN 50
-                            WHEN p.name LIKE :score_search THEN 30
-                            ELSE 1
-                        END as relevance_score
-                        FROM products p
-                        LEFT JOIN brands b ON p.brand_id = b.brand_id
-                        LEFT JOIN series s ON p.series_id = s.series_id
-                        WHERE (" . implode(' OR ', $whereClauses) . ")";
-    
-                // Добавляем параметры для скоринга (с уникальными именами)
-                $bindParams['score_exact'] = $query;
-                $bindParams['score_prefix'] = $query . '%';
-                $bindParams['score_search'] = '%' . $query . '%';
-            }
-    
-            // Сортировка
-            switch ($params['sort']) {
-                case 'name':
-                    $sql .= " ORDER BY p.name ASC";
-                    break;
-                case 'external_id':
-                    $sql .= " ORDER BY p.external_id ASC";
-                    break;
-                case 'popularity':
-                    $sql .= " ORDER BY p.product_id DESC";
-                    break;
-                default:
-                    if (!empty($query)) {
-                        $sql .= " ORDER BY relevance_score DESC, p.name ASC";
-                    } else {
-                        $sql .= " ORDER BY p.product_id DESC";
-                    }
-                    break;
-            }
-    
-            $sql .= " LIMIT :limit OFFSET :offset";
-    
-            $stmt = $pdo->prepare($sql);
-    
-            // Привязываем параметры поиска
-            foreach ($bindParams as $key => $value) {
-                $stmt->bindValue($key, $value, \PDO::PARAM_STR);
-            }
-    
-            $stmt->bindValue(':limit', $limit, \PDO::PARAM_INT);
-            $stmt->bindValue(':offset', $offset, \PDO::PARAM_INT);
-            
-            $stmt->execute();
-    
-            $products = $stmt->fetchAll(\PDO::FETCH_ASSOC);
-            $total = $pdo->query("SELECT FOUND_ROWS()")->fetchColumn();
-    
-            Logger::info("MySQL search completed", [
-                'query' => $query,
-                'variants' => $searchVariants ?? [],
-                'found' => count($products),
-                'total' => $total
-            ]);
-    
-            return [
-                'products' => $products,
-                'total' => (int)$total,
-                'page' => $page,
-                'limit' => $limit,
-                'source' => 'mysql',
-                'search_variants' => $searchVariants ?? []
-            ];
-    
-        } catch (\Exception $e) {
-            Logger::error('MySQL search failed', ['error' => $e->getMessage()]);
-            throw $e;
-        }
-    }
-
-    /**
-     * Генерация вариантов поискового запроса
-     */
-    private static function generateSearchVariants(string $query): array
-    {
-        $variants = [$query]; // Оригинальный запрос
-
-        // 1. Конвертация раскладки клавиатуры RU<->EN
-        $layoutConverted = self::convertKeyboardLayout($query);
-        if ($layoutConverted !== $query) {
-            $variants[] = $layoutConverted;
-        }
-
-        // 2. Транслитерация RU->EN
-        $transliterated = self::transliterate($query);
-        if ($transliterated !== $query && $transliterated !== $layoutConverted) {
-            $variants[] = $transliterated;
-        }
-
-        // 3. Обратная транслитерация EN->RU
-        $cyrillic = self::toCyrillic($query);
-        if ($cyrillic !== $query && !in_array($cyrillic, $variants)) {
-            $variants[] = $cyrillic;
-        }
-
-        // 4. Удаление пробелов и спецсимволов для артикулов
-        $normalized = preg_replace('/[^a-zA-Z0-9а-яА-Я]/u', '', $query);
-        if ($normalized !== $query && !in_array($normalized, $variants)) {
-            $variants[] = $normalized;
-        }
-
-        return array_unique($variants);
-    }
-
-    /**
-     * Конвертация раскладки клавиатуры
-     */
-    private static function convertKeyboardLayout(string $text): string
-    {
-        $ru = 'йцукенгшщзхъфывапролджэячсмитьбю';
-        $en = 'qwertyuiop[]asdfghjkl;\'zxcvbnm,.';
-
-        $ruUpper = mb_strtoupper($ru);
-        $enUpper = strtoupper($en);
-
-        // RU -> EN
-        $result = strtr($text, $ru . $ruUpper, $en . $enUpper);
-        if ($result !== $text) {
-            return $result;
-        }
-
-        // EN -> RU
-        return strtr($text, $en . $enUpper, $ru . $ruUpper);
-    }
-
-    /**
-     * Транслитерация RU -> EN
-     */
-    private static function transliterate(string $text): string
-    {
-        $rules = [
-            'а' => 'a', 'б' => 'b', 'в' => 'v', 'г' => 'g', 'д' => 'd',
-            'е' => 'e', 'ё' => 'e', 'ж' => 'zh', 'з' => 'z', 'и' => 'i',
-            'й' => 'y', 'к' => 'k', 'л' => 'l', 'м' => 'm', 'н' => 'n',
-            'о' => 'o', 'п' => 'p', 'р' => 'r', 'с' => 's', 'т' => 't',
-            'у' => 'u', 'ф' => 'f', 'х' => 'h', 'ц' => 'ts', 'ч' => 'ch',
-            'ш' => 'sh', 'щ' => 'sch', 'ъ' => '', 'ы' => 'y', 'ь' => '',
-            'э' => 'e', 'ю' => 'yu', 'я' => 'ya'
-        ];
-
-        $text = mb_strtolower($text);
-        return strtr($text, $rules);
-    }
-
-    /**
-     * Обратная транслитерация EN -> RU (простая версия)
-     */
-    private static function toCyrillic(string $text): string
-    {
-        $rules = [
-            'a' => 'а', 'b' => 'б', 'v' => 'в', 'g' => 'г', 'd' => 'д',
-            'e' => 'е', 'z' => 'з', 'i' => 'и', 'k' => 'к', 'l' => 'л',
-            'm' => 'м', 'n' => 'н', 'o' => 'о', 'p' => 'п', 'r' => 'р',
-            's' => 'с', 't' => 'т', 'u' => 'у', 'f' => 'ф', 'h' => 'х',
-            'c' => 'ц', 'y' => 'у'
-        ];
-
-        $text = strtolower($text);
-        return strtr($text, $rules);
-    }
-
-    /**
-     * Проверка доступности OpenSearch с кешированием
-     */
-    private static function isOpenSearchAvailable(): bool
-    {
-        static $isAvailable = null;
-        static $lastCheck = 0;
-        static $consecutiveFailures = 0;
-
-        // Кеш проверки на 60 секунд при успехе, 10 секунд при неудаче
-        $cacheTime = $isAvailable ? 60 : 10;
-
-        if ($isAvailable !== null && (time() - $lastCheck) < $cacheTime) {
-            return $isAvailable;
-        }
-
-        try {
-            $startTime = microtime(true);
-            $client = self::getClient();
-
-            // Быстрая проверка ping
-            $response = $client->ping();
-
-            if ($response) {
-                // Дополнительно проверяем здоровье кластера
-                $health = $client->cluster()->health([
-                    'timeout' => '2s'
-                ]);
-
-                $isAvailable = in_array($health['status'] ?? 'red', ['green', 'yellow']);
-
-                if ($isAvailable) {
-                    $consecutiveFailures = 0;
-                    Logger::debug("✅ OpenSearch available", [
-                        'ping_time_ms' => round((microtime(true) - $startTime) * 1000, 2),
-                        'cluster_status' => $health['status'] ?? 'unknown'
-                    ]);
-                } else {
-                    $consecutiveFailures++;
-                    Logger::warning("⚠️ OpenSearch cluster not healthy", [
-                        'status' => $health['status'] ?? 'unknown'
-                    ]);
-                }
-            } else {
-                $isAvailable = false;
-                $consecutiveFailures++;
-                Logger::warning("❌ OpenSearch ping failed");
-            }
-
-            $lastCheck = time();
-
-        } catch (\Exception $e) {
-            $isAvailable = false;
-            $lastCheck = time();
-            $consecutiveFailures++;
-
-            Logger::error("❌ OpenSearch check failed", [
-                'error' => $e->getMessage(),
-                'consecutive_failures' => $consecutiveFailures
-            ]);
-
-            // После 5 неудачных попыток увеличиваем интервал проверки
-            if ($consecutiveFailures >= 5) {
-                $lastCheck = time() - 50; // Будет проверять раз в 10 секунд вместо каждого запроса
-            }
-        }
-
-        return $isAvailable;
-    }
-
-    private static function getClient(): \OpenSearch\Client
-    {
-        if (self::$client === null) {
-            self::$client = ClientBuilder::create()
-                ->setHosts(['localhost:9200'])
-                ->setRetries(1)
-                ->setConnectionParams([
-                    'timeout' => 5,
-                    'connect_timeout' => 2
-                ])
-                ->build();
-        }
-        return self::$client;
-    }
-
-    private static function validateParams(array $params): array
-    {
-        return [
-            'q' => trim($params['q'] ?? ''),
-            'page' => max(1, (int)($params['page'] ?? 1)),
-            'limit' => min(100, max(1, (int)($params['limit'] ?? 20))),
-            'city_id' => (int)($params['city_id'] ?? 1),
-            'sort' => $params['sort'] ?? 'relevance',
-            'user_id' => $params['user_id'] ?? null
-        ];
-    }
-
-    /**
-     * 🔍 Умный парсер поискового запроса
-     * 
-     * Разбивает запрос на логические части:
-     * - Числа с единицами (16А, 220В)
-     * - Коды/артикулы (MVA40-1-016-C)
-     * - Обычные слова (выключатель, автоматический)
-     * 
-     * @param string $query Поисковый запрос
-     * @return array Структурированные части запроса
-     */
-    private static function parseSearchQuery(string $query): array
-    {
-        $query = trim($query);
-
-        // Инициализируем результат
-        $result = [
-            'original' => $query,
-            'words' => [],
-            'numbers' => [],
-            'codes' => [],
-            'exact' => [],
-            'cleaned' => ''
-        ];
-
-        if (empty($query)) {
-            return $result;
-        }
-
-        // 1. Извлекаем точные фразы в кавычках
-        if (preg_match_all('/"([^"]+)"/', $query, $matches)) {
-            $result['exact'] = $matches[1];
-            // Удаляем кавычки из основного запроса
-            $query = preg_replace('/"[^"]+"/', '', $query);
-        }
-
-        // 2. Нормализуем запрос
-        $normalized = preg_replace('/\s+/', ' ', trim($query));
-        $result['cleaned'] = $normalized;
-
-        // 3. Разбиваем на токены
-        $tokens = preg_split('/[\s\-_,;.]+/', $normalized, -1, PREG_SPLIT_NO_EMPTY);
-
-        foreach ($tokens as $token) {
-            $token = trim($token);
-            if (empty($token)) continue;
-
-            // Проверяем, это число с единицами (16А, 220В, 2.5мм)
-            if (preg_match('/^\d+([.,]\d+)?\s*[а-яА-Яa-zA-Z]*$/u', $token)) {
-                $result['numbers'][] = $token;
-            }
-            // Проверяем, это код/артикул (содержит цифры, буквы, дефисы)
-            elseif (preg_match('/^[a-zA-Z0-9\-_.]{3,}$/i', $token) && preg_match('/\d/', $token)) {
-                $result['codes'][] = $token;
-            }
-            // Обычное слово
-            else {
-                $result['words'][] = $token;
-            }
-        }
-
-        // 4. Убираем дубликаты
-        $result['words'] = array_unique($result['words']);
-        $result['numbers'] = array_unique($result['numbers']);
-        $result['codes'] = array_unique($result['codes']);
-        $result['exact'] = array_unique($result['exact']);
-
-        return $result;
-    }
-
-    private const KNOWN_BRANDS = [
-        'iek', 'karat', 'schneider', 'abb', 'legrand', 
-        'русский свет', 'российский свет', 'russian light'
-    ];
-
-    /**
-     * 🎨 Конфигурация подсветки найденных терминов в результатах поиска
-     * 
-     * Что это делает:
-     * - Выделяет найденные слова в названии товара
-     * - Подсвечивает совпадения в артикуле 
-     * - Показывает релевантные части текста
-     * 
-     * @return array Конфигурация для OpenSearch highlight
-     */
-    private static function buildHighlightConfig(): array 
-    {
-        return [
-            'fields' => [
-                // Подсветка в названии товара (самое важное поле)
-                'name' => [
-                    'type' => 'unified',           
-                    'number_of_fragments' => 0,   
-                    'pre_tags' => ['<mark>'],     
-                    'post_tags' => ['</mark>']    
-                ],
-                
-                // Подсветка в артикуле (для точного поиска кодов)
-                'external_id' => [
-                    'type' => 'unified', 
-                    'number_of_fragments' => 0,   
-                    'pre_tags' => ['<mark>'],
-                    'post_tags' => ['</mark>']
-                ],
-                
-                // Подсветка в названии бренда
-                'brand_name' => [
-                    'type' => 'unified',
-                    'number_of_fragments' => 0,
-                    'pre_tags' => ['<mark>'],
-                    'post_tags' => ['</mark>']
-                ],
-                
-                // Подсветка в описании (если есть)
-                'description' => [
-                    'type' => 'unified',
-                    'number_of_fragments' => 2,   
-                    'fragment_size' => 150,       
-                    'pre_tags' => ['<mark>'],
-                    'post_tags' => ['</mark>']
-                ]
-            ],
-            
-            // Дополнительные настройки
-            'require_field_match' => false,    
-            'fragment_size' => 150,            
-            'max_analyzer_offset' => 1000000   // ИСПРАВЛЕНО: правильное название поля
-        ];
-    }
-
-    private static function performOpenSearchWithTimeout(array $params, string $requestId, array $parsedQuery): array
-    {
-        $client = self::getClient();
-    
-        // 🔥 Основная структура запроса
-        $body = [
-            'timeout' => '15s',
-            'size' => $params['limit'],
-            'from' => ($params['page'] - 1) * $params['limit'],
-            'track_total_hits' => true,
-            '_source' => true
-        ];
-    
-        if (!empty($params['q'])) {
-            $query = trim($params['q']);
-            
-            // Генерируем варианты запроса (включая конвертацию раскладки)
-            $searchVariants = self::generateSearchVariants($query);
-            
-            // Создаем массив should условий для всех вариантов
-            $shouldClauses = [];
-            
-            foreach ($searchVariants as $variantIndex => $variant) {
-                // Для каждого варианта добавляем поиск
-                
-                // 1. Точное совпадение артикула/SKU
-                $shouldClauses[] = [
-                    'bool' => [
-                        'should' => [
-                            ['term' => ['external_id.keyword' => ['value' => $variant, 'boost' => 1000]]],
-                            ['term' => ['sku.keyword' => ['value' => $variant, 'boost' => 900]]]
-                        ]
-                    ]
-                ];
-                
-                // 2. Точная фраза в названии
-                $shouldClauses[] = [
-                    'match_phrase' => [
-                        'name' => [
-                            'query' => $variant,
-                            'boost' => 500,
-                            'slop' => 0
-                        ]
-                    ]
-                ];
-                
-                // 3. Поиск в названии с анализатором
-                $shouldClauses[] = [
-                    'match' => [
-                        'name' => [
-                            'query' => $variant,
-                            'operator' => 'and',
-                            'boost' => 200,
-                            'analyzer' => 'search_analyzer' // Используем анализатор с конвертацией раскладки
-                        ]
-                    ]
-                ];
-                
-                // 4. Частичное совпадение
-                $shouldClauses[] = [
-                    'match' => [
-                        'name' => [
-                            'query' => $variant,
-                            'minimum_should_match' => '75%',
-                            'boost' => 100,
-                            'analyzer' => 'search_analyzer'
-                        ]
-                    ]
-                ];
-                
-                // 5. Поиск по бренду
-                $shouldClauses[] = [
-                    'match' => [
-                        'brand_name' => [
-                            'query' => $variant,
-                            'boost' => 80,
-                            'analyzer' => 'search_analyzer'
-                        ]
-                    ]
-                ];
-                
-                // 6. Wildcard для артикулов
-                if (strlen($variant) >= 3) {
-                    $shouldClauses[] = [
-                        'wildcard' => [
-                            'external_id.keyword' => [
-                                'value' => "*{$variant}*",
-                                'boost' => 150
-                            ]
-                        ]
-                    ];
-                }
-                
-                // 7. Автодополнение
-                $shouldClauses[] = [
-                    'match' => [
-                        'name.autocomplete' => [
-                            'query' => $variant,
-                            'boost' => 60
-                        ]
-                    ]
-                ];
-                
-                // 8. Поиск в общем поисковом тексте
-                $shouldClauses[] = [
-                    'match' => [
-                        'search_text' => [
-                            'query' => $variant,
-                            'boost' => 30,
-                            'analyzer' => 'search_analyzer'
-                        ]
-                    ]
-                ];
-            }
-    
-            // Создаем базовый запрос
-            $baseQuery = [
-                'bool' => [
-                    'should' => $shouldClauses,
-                    'minimum_should_match' => 1
-                ]
-            ];
-    
-            // Добавляем функциональный скоринг
-            $body['query'] = [
-                'function_score' => [
-                    'query' => $baseQuery,
-                    'functions' => [
-                        // Буст для товаров в наличии
-                        [
-                            'filter' => ['term' => ['has_stock' => true]],
-                            'weight' => 1.5
-                        ],
-                        // Буст по популярности
-                        [
-                            'field_value_factor' => [
-                                'field' => 'popularity_score',
-                                'modifier' => 'log1p',
-                                'factor' => 1.2,
-                                'missing' => 0
-                            ]
-                        ]
-                    ],
-                    'score_mode' => 'multiply',
-                    'boost_mode' => 'multiply'
-                ]
-            ];
-    
-            // ✅ Добавляем подсветку
-            $body['highlight'] = self::buildHighlightConfig();
-        } else {
-            // Без поискового запроса - просто листинг
-            $body['query'] = ['match_all' => new \stdClass()];
-        }
-    
-        // Сортировка
-        if (!empty($params['q'])) {
-            $body['sort'] = [
-                ['_score' => 'desc'],
-                ['has_stock' => 'desc'],
-                ['popularity_score' => 'desc']
-            ];
-        } else {
-            switch ($params['sort']) {
-                case 'name':
-                    $body['sort'] = [['name.keyword' => 'asc']];
-                    break;
-                case 'external_id':
-                    $body['sort'] = [['external_id.keyword' => 'asc']];
-                    break;
-                default:
-                    $body['sort'] = [['product_id' => 'desc']];
-                    break;
-            }
-        }
-    
-        Logger::debug("[$requestId] OpenSearch query", ['body' => json_encode($body, JSON_PRETTY_PRINT)]);
-    
-        try {
-            $response = $client->search([
-                'index' => 'products_current',
-                'body' => $body
-            ]);
-    
-            // Обработка результатов
-            $products = [];
-            foreach ($response['hits']['hits'] ?? [] as $hit) {
-                $product = $hit['_source'];
-                $product['_score'] = $hit['_score'] ?? 0;
-    
-                // Добавляем подсветку
-                if (isset($hit['highlight'])) {
-                    $product['_highlight'] = $hit['highlight'];
-                }
-    
-                $products[] = $product;
-            }
-    
-            $total = $response['hits']['total']['value'] ?? 0;
-    
-            Logger::info("[$requestId] OpenSearch success", [
-                'query' => $params['q'],
-                'total' => $total,
-                'returned' => count($products),
-                'max_score' => $response['hits']['max_score'] ?? 0,
-                'variants_used' => $searchVariants ?? []
-            ]);
-    
-            return [
-                'products' => $products,
-                'total' => $total,
-                'page' => $params['page'],
-                'limit' => $params['limit'],
-                'source' => 'opensearch',
-                'max_score' => $response['hits']['max_score'] ?? 0,
-                'search_variants' => $searchVariants ?? []
-            ];
-    
-        } catch (\Exception $e) {
-            Logger::error("[$requestId] OpenSearch failed", ['error' => $e->getMessage()]);
-            throw $e;
-        }
-    }
-}
