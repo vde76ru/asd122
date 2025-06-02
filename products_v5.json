@@ -1,0 +1,446 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 1,
+    "index.max_ngram_diff": 20,
+    "index.max_result_window": 50000,
+    "index.refresh_interval": "30s",
+    "index.number_of_routing_shards": 1,
+    "analysis": {
+      "normalizer": {
+        "lowercase": {
+          "type": "custom",
+          "char_filter": [],
+          "filter": ["lowercase"]
+        }
+      },
+      "char_filter": {
+        "ru_en_keyboard_mapping": {
+          "type": "mapping",
+          "mappings": [
+            "q=>й","w=>ц","e=>у","r=>к","t=>е","y=>н","u=>г","i=>ш","o=>щ","z=>з","p=>п",
+            "a=>ф","s=>ы","d=>в","f=>а","g=>п","h=>р","j=>о","k=>л","l=>д",
+            "x=>ч","c=>с","v=>м","b=>и","n=>т","m=>ь",
+            "ё=>е","й=>и",
+            "A=>А","B=>В","E=>Е","K=>К","M=>М","H=>Н","O=>О","P=>Р","C=>С","T=>Т","Y=>У","X=>Х",
+            "/=> ","\\\\=> ","-=> ","_=> ",".=> ",",=> "
+          ]
+        },
+        "code_normalizer": {
+          "type": "pattern_replace",
+          "pattern": "[\\s\\-\\._/,]+",
+          "replacement": ""
+        },
+        "space_normalizer": {
+          "type": "pattern_replace",
+          "pattern": "\\s+",
+          "replacement": " "
+        },
+        "remove_special": {
+          "type": "pattern_replace",
+          "pattern": "[^\\p{L}\\p{N}\\s]",
+          "replacement": " "
+        }
+      },
+      "tokenizer": {
+        "edge_ngram_tokenizer": {
+          "type": "edge_ngram",
+          "min_gram": 1,
+          "max_gram": 20,
+          "token_chars": ["letter", "digit"]
+        },
+        "ngram_tokenizer": {
+          "type": "ngram",
+          "min_gram": 3,
+          "max_gram": 5,
+          "token_chars": ["letter", "digit"]
+        },
+        "autocomplete_tokenizer": {
+          "type": "edge_ngram",
+          "min_gram": 2,
+          "max_gram": 15,
+          "token_chars": ["letter", "digit"]
+        }
+      },
+      "filter": {
+        "synonym_filter": {
+          "type": "synonym",
+          "synonyms": [
+            "выключатель,переключатель,switch,свитч,выкл,выключ",
+            "розетка,разъем,socket,гнездо,разьем,розет",
+            "кабель,провод,шнур,cable,wire,кабел,кабл",
+            "автомат,автоматический выключатель,авт выкл,mcb,автомат выключатель,автоматич",
+            "щит,щиток,шкаф,бокс,panel,щитовое,щитов",
+            "лампа,лампочка,светильник,lamp,light,освещение,ламп",
+            "вт,ватт,w,watt=>ватт",
+            "квт,киловатт,kw,kilowatt=>киловатт",
+            "а,ампер,a,amp,ampere=>ампер",
+            "в,вольт,v,volt=>вольт",
+            "мм,миллиметр,mm=>миллиметр",
+            "м,метр,m,meter=>метр",
+            "шнайдер,schneider,шнейдер,schneid=>schneider",
+            "легранд,legrand,легран=>legrand",
+            "абб,abb=>abb",
+            "иэк,iek,иек=>iek",
+            "дкс,dks,дкц=>dks"
+          ]
+        },
+        "russian_stemmer": {
+          "type": "stemmer",
+          "language": "russian"
+        },
+        "english_stemmer": {
+          "type": "stemmer",
+          "language": "english"
+        },
+        "shingle_filter": {
+          "type": "shingle",
+          "min_shingle_size": 2,
+          "max_shingle_size": 3,
+          "output_unigrams": true
+        },
+        "edge_ngram_filter": {
+          "type": "edge_ngram",
+          "min_gram": 2,
+          "max_gram": 15
+        },
+        "phonetic_filter": {
+          "type": "phonetic",
+          "encoder": "double_metaphone",
+          "replace": false
+        }
+      },
+      "analyzer": {
+        "text_analyzer": {
+          "tokenizer": "standard",
+          "char_filter": ["ru_en_keyboard_mapping", "space_normalizer"],
+          "filter": ["lowercase", "synonym_filter", "russian_stemmer", "english_stemmer"]
+        },
+        "text_analyzer_no_stemming": {
+          "tokenizer": "standard",
+          "char_filter": ["ru_en_keyboard_mapping", "space_normalizer"],
+          "filter": ["lowercase", "synonym_filter"]
+        },
+        "code_analyzer": {
+          "tokenizer": "keyword",
+          "char_filter": ["code_normalizer"],
+          "filter": ["lowercase"]
+        },
+        "code_prefix_analyzer": {
+          "tokenizer": "keyword",
+          "char_filter": ["code_normalizer"],
+          "filter": ["lowercase", "edge_ngram_filter"]
+        },
+        "autocomplete_analyzer": {
+          "tokenizer": "autocomplete_tokenizer",
+          "char_filter": ["ru_en_keyboard_mapping", "space_normalizer"],
+          "filter": ["lowercase"]
+        },
+        "ngram_analyzer": {
+          "tokenizer": "ngram_tokenizer",
+          "char_filter": ["ru_en_keyboard_mapping", "remove_special"],
+          "filter": ["lowercase"]
+        },
+        "phonetic_analyzer": {
+          "tokenizer": "standard",
+          "char_filter": ["space_normalizer"],
+          "filter": ["lowercase", "phonetic_filter"]
+        },
+        "search_analyzer": {
+          "tokenizer": "standard",
+          "char_filter": ["ru_en_keyboard_mapping", "space_normalizer"],
+          "filter": ["lowercase", "synonym_filter"]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "properties": {
+      "product_id": {
+        "type": "long",
+        "index": true
+      },
+      "external_id": {
+        "type": "text",
+        "analyzer": "code_analyzer",
+        "search_analyzer": "code_analyzer",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "normalizer": "lowercase"
+          },
+          "prefix": {
+            "type": "text",
+            "analyzer": "code_prefix_analyzer",
+            "search_analyzer": "code_analyzer"
+          },
+          "ngram": {
+            "type": "text",
+            "analyzer": "ngram_analyzer"
+          }
+        }
+      },
+      "sku": {
+        "type": "text",
+        "analyzer": "code_analyzer",
+        "search_analyzer": "code_analyzer",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "normalizer": "lowercase"
+          },
+          "prefix": {
+            "type": "text",
+            "analyzer": "code_prefix_analyzer",
+            "search_analyzer": "code_analyzer"
+          }
+        }
+      },
+      "name": {
+        "type": "text",
+        "analyzer": "text_analyzer",
+        "search_analyzer": "search_analyzer",
+        "fields": {
+          "keyword": {
+            "type": "keyword"
+          },
+          "raw": {
+            "type": "keyword",
+            "normalizer": "lowercase"
+          },
+          "no_stemming": {
+            "type": "text",
+            "analyzer": "text_analyzer_no_stemming",
+            "search_analyzer": "search_analyzer"
+          },
+          "autocomplete": {
+            "type": "text",
+            "analyzer": "autocomplete_analyzer",
+            "search_analyzer": "search_analyzer"
+          },
+          "ngram": {
+            "type": "text",
+            "analyzer": "ngram_analyzer"
+          },
+          "phonetic": {
+            "type": "text",
+            "analyzer": "phonetic_analyzer"
+          }
+        }
+      },
+      "description": {
+        "type": "text",
+        "analyzer": "text_analyzer",
+        "search_analyzer": "search_analyzer",
+        "fields": {
+          "ngram": {
+            "type": "text",
+            "analyzer": "ngram_analyzer"
+          }
+        }
+      },
+      "unit": {
+        "type": "keyword"
+      },
+      "min_sale": {
+        "type": "integer"
+      },
+      "weight": {
+        "type": "float"
+      },
+      "dimensions": {
+        "type": "keyword"
+      },
+      "created_at": {
+        "type": "date"
+      },
+      "updated_at": {
+        "type": "date"
+      },
+      "brand_id": {
+        "type": "integer"
+      },
+      "brand_name": {
+        "type": "text",
+        "analyzer": "text_analyzer",
+        "search_analyzer": "search_analyzer",
+        "fields": {
+          "keyword": {
+            "type": "keyword"
+          },
+          "raw": {
+            "type": "keyword",
+            "normalizer": "lowercase"
+          },
+          "autocomplete": {
+            "type": "text",
+            "analyzer": "autocomplete_analyzer",
+            "search_analyzer": "search_analyzer"
+          },
+          "phonetic": {
+            "type": "text",
+            "analyzer": "phonetic_analyzer"
+          }
+        }
+      },
+      "series_id": {
+        "type": "integer"
+      },
+      "series_name": {
+        "type": "text",
+        "analyzer": "text_analyzer",
+        "search_analyzer": "search_analyzer",
+        "fields": {
+          "keyword": {
+            "type": "keyword"
+          },
+          "raw": {
+            "type": "keyword",
+            "normalizer": "lowercase"
+          },
+          "autocomplete": {
+            "type": "text",
+            "analyzer": "autocomplete_analyzer"
+          }
+        }
+      },
+      "price": {
+        "type": "object",
+        "properties": {
+          "final": {
+            "type": "float"
+          },
+          "base": {
+            "type": "float"
+          },
+          "has_special": {
+            "type": "boolean"
+          }
+        }
+      },
+      "stock": {
+        "type": "object",
+        "properties": {
+          "quantity": {
+            "type": "integer"
+          },
+          "available": {
+            "type": "boolean"
+          }
+        }
+      },
+      "availability": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "text"
+          }
+        }
+      },
+      "images": {
+        "type": "keyword"
+      },
+      "image_url": {
+        "type": "keyword"
+      },
+      "image_urls": {
+        "type": "keyword"
+      },
+      "_exact_match": {
+        "type": "boolean"
+      },
+      "_formatted_name": {
+        "type": "text"
+      },
+      "_highlight": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "text"
+          }
+        }
+      },
+      "suggest": {
+        "type": "completion",
+        "analyzer": "text_analyzer_no_stemming",
+        "search_analyzer": "text_analyzer_no_stemming",
+        "preserve_separators": false,
+        "preserve_position_increments": false,
+        "max_input_length": 100
+      },
+      "popularity_score": {
+        "type": "float",
+        "null_value": 0.0
+      },
+      "in_stock": {
+        "type": "boolean",
+        "null_value": false
+      },
+      "categories": {
+        "type": "text",
+        "analyzer": "text_analyzer",
+        "fields": {
+          "keyword": {
+            "type": "keyword"
+          },
+          "raw": {
+            "type": "keyword",
+            "normalizer": "lowercase"
+          }
+        }
+      },
+      "category_ids": {
+        "type": "integer"
+      },
+      "attributes": {
+        "type": "nested",
+        "properties": {
+          "name": {
+            "type": "text",
+            "analyzer": "text_analyzer",
+            "fields": {
+              "keyword": {
+                "type": "keyword"
+              }
+            }
+          },
+          "value": {
+            "type": "text",
+            "analyzer": "text_analyzer",
+            "fields": {
+              "keyword": {
+                "type": "keyword"
+              }
+            }
+          },
+          "unit": {
+            "type": "keyword"
+          }
+        }
+      },
+      "documents": {
+        "type": "object",
+        "properties": {
+          "certificates": {
+            "type": "integer"
+          },
+          "manuals": {
+            "type": "integer"
+          },
+          "drawings": {
+            "type": "integer"
+          }
+        }
+      },
+      "total_stock": {
+        "type": "integer"
+      },
+      "cities_available": {
+        "type": "integer"
+      },
+      "has_stock": {
+        "type": "boolean"
+      }
+    }
+  }
+}
